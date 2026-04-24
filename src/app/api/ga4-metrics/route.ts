@@ -30,38 +30,46 @@ WITH events AS (
     IF(event_name = 'purchase',
       COALESCE(
         (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'value'),
-        (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'value')
+        (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'value'),
+        0
       ),
       0
-    ) AS revenue_value
+    ) AS purchase_value
   FROM \`${projectId}.${dataset}.events_*\`
   WHERE _TABLE_SUFFIX BETWEEN '${startSuffix}' AND '${endSuffix}'
 ),
 
+daily_totals AS (
+  SELECT event_day, COUNT(*) AS event_count
+  FROM events
+  GROUP BY event_day
+),
+
+-- Per session: aggregate metrics
 session_stats AS (
   SELECT
     event_day,
     user_pseudo_id,
     session_id,
     MAX(engagement_time) AS max_engagement_time,
-    COUNTIF(event_name = 'page_view') AS page_views,
     COUNTIF(event_name = 'purchase') AS purchase_events,
-    SUM(revenue_value) AS revenue
+    MAX(purchase_value) AS session_revenue
   FROM events
   GROUP BY event_day, user_pseudo_id, session_id
 )
 
 SELECT
-  CAST(event_day AS STRING) AS date,
-  COUNT(DISTINCT CONCAT(CAST(user_pseudo_id AS STRING), '-', CAST(session_id AS STRING))) AS sessions,
-  COUNT(DISTINCT user_pseudo_id) AS activeUsers,
-  COUNT(DISTINCT user_pseudo_id) AS totalUsers,
-  COUNT(*) AS eventCount,
-  COUNTIF(max_engagement_time > 0) AS engagedSessions,
-  COUNTIF(purchase_events > 0) AS conversions,
-  COALESCE(SUM(revenue), 0) AS revenue
-FROM session_stats
-GROUP BY event_day
+  CAST(s.event_day AS STRING) AS date,
+  COUNT(DISTINCT CONCAT(CAST(s.user_pseudo_id AS STRING), '-', CAST(s.session_id AS STRING))) AS sessions,
+  COUNT(DISTINCT s.user_pseudo_id) AS activeUsers,
+  COUNT(DISTINCT s.user_pseudo_id) AS totalUsers,
+  dt.event_count AS eventCount,
+  COUNTIF(s.max_engagement_time > 0) AS engagedSessions,
+  COUNTIF(s.purchase_events > 0) AS conversions,
+  COALESCE(SUM(s.session_revenue), 0) AS revenue
+FROM session_stats s
+JOIN daily_totals dt ON dt.event_day = s.event_day
+GROUP BY date, dt.event_count
 ORDER BY event_day ASC
 `;
 
