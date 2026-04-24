@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npx tsc *)",
+      "Bash(GA4_BQ_PROJECT=yarbo-441803 GA4_BQ_DATASET=analytics_321746415 GA4_SERVICE_ACCOUNT_PATH=./credentials/ga4-service-account.json npx tsx test-bq.ts)",
+      "Bash(gh auth *)",
+      "Bash(npx vercel *)",
+      "Bash(git remote *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git push *)"
+    ]
+  }
+}
