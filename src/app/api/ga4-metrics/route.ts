@@ -69,8 +69,8 @@ SELECT
   COALESCE(SUM(s.session_revenue), 0) AS revenue
 FROM session_stats s
 JOIN daily_totals dt ON dt.event_day = s.event_day
-GROUP BY date, dt.event_count
-ORDER BY event_day ASC
+GROUP BY s.event_day, dt.event_count
+ORDER BY s.event_day ASC
 `;
 
   try {
