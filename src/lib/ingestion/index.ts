@@ -252,24 +252,33 @@ export async function fetchTikTokMetrics(
   }
 }
 
+// ==================== GA4 auth helper ====================
+
+function getGA4AuthOptions() {
+  const credentialsJson = process.env.GA4_SERVICE_ACCOUNT_JSON;
+  if (credentialsJson) {
+    return { credentials: JSON.parse(credentialsJson) };
+  }
+  const credentialsPath = process.env.GA4_SERVICE_ACCOUNT_PATH;
+  if (!credentialsPath) throw new Error('GA4_SERVICE_ACCOUNT_JSON 或 GA4_SERVICE_ACCOUNT_PATH 未配置');
+  return { keyFilename: credentialsPath };
+}
+
 // ==================== GA4 ====================
+
 export async function fetchGA4Metrics(
   startDate: string,
   endDate: string
 ): Promise<PlatformMetric[]> {
   const propertyId = process.env.GA4_PROPERTY_ID;
-  const ga4ServiceAccountPath = process.env.GA4_SERVICE_ACCOUNT_PATH;
 
   if (!propertyId) {
     throw new Error('GA4_PROPERTY_ID 未配置');
   }
-  if (!ga4ServiceAccountPath) {
-    throw new Error('GA4_SERVICE_ACCOUNT_PATH 未配置');
-  }
 
   try {
     const auth = new GoogleAuth({
-      keyFilename: ga4ServiceAccountPath,
+      ...getGA4AuthOptions(),
       scopes: ['https://www.googleapis.com/auth/analytics.readonly'],
     });
 
@@ -350,15 +359,14 @@ export async function fetchGA4GeoData(
   endDate: string
 ): Promise<GA4GeoData[]> {
   const propertyId = process.env.GA4_PROPERTY_ID;
-  const ga4ServiceAccountPath = process.env.GA4_SERVICE_ACCOUNT_PATH;
 
-  if (!propertyId || !ga4ServiceAccountPath) {
-    throw new Error('GA4 凭据未配置');
+  if (!propertyId) {
+    throw new Error('GA4_PROPERTY_ID 未配置');
   }
 
   try {
     const auth = new GoogleAuth({
-      keyFilename: ga4ServiceAccountPath,
+      ...getGA4AuthOptions(),
       scopes: ['https://www.googleapis.com/auth/analytics.readonly'],
     });
     const client = await auth.getClient();
@@ -419,15 +427,14 @@ export async function fetchGA4SourceMediumData(
   endDate: string
 ): Promise<GA4SourceMediumData[]> {
   const propertyId = process.env.GA4_PROPERTY_ID;
-  const ga4ServiceAccountPath = process.env.GA4_SERVICE_ACCOUNT_PATH;
 
-  if (!propertyId || !ga4ServiceAccountPath) {
-    throw new Error('GA4 凭据未配置');
+  if (!propertyId) {
+    throw new Error('GA4_PROPERTY_ID 未配置');
   }
 
   try {
     const auth = new GoogleAuth({
-      keyFilename: ga4ServiceAccountPath,
+      ...getGA4AuthOptions(),
       scopes: ['https://www.googleapis.com/auth/analytics.readonly'],
     });
     const client = await auth.getClient();

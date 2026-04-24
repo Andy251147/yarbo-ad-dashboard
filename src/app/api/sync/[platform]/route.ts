@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { platformFetchers } from '@/lib/ingestion';
-import { upsertMetrics } from '@/lib/db';
+import { upsertMetrics, getGA4Metrics } from '@/lib/bq-analysis';
 
 export async function POST(
   request: NextRequest,
@@ -10,7 +10,6 @@ export async function POST(
   const body = await request.json().catch(() => ({}));
   const { startDate, endDate } = body;
 
-  // 默认拉取最近 7 天
   const end = endDate || new Date().toISOString().split('T')[0];
   const start = startDate || (() => {
     const d = new Date();
@@ -18,29 +17,36 @@ export async function POST(
     return d.toISOString().split('T')[0];
   })();
 
-  const fetcher = platformFetchers[platform];
-  if (!fetcher) {
-    return NextResponse.json(
-      { error: `不支持的平台: ${platform}` },
-      { status: 400 }
-    );
-  }
-
   try {
-    const metrics = await fetcher(start, end);
+    let count: number;
 
-    if (metrics.length === 0) {
+    if (platform === 'ga4') {
+      // GA4: query directly from BigQuery events_* tables
+      const metrics = await getGA4Metrics(start, end);
+      count = metrics.length > 0 ? (await upsertMetrics(metrics)) : 0;
+    } else {
+      // Ad platforms: fetch from their APIs then write to BigQuery
+      const fetcher = platformFetchers[platform];
+      if (!fetcher) {
+        return NextResponse.json(
+          { error: `不支持的平台: ${platform}` },
+          { status: 400 }
+        );
+      }
+      const metrics = await fetcher(start, end);
+      count = metrics.length > 0 ? (await upsertMetrics(metrics)) : 0;
+    }
+
+    if (count === 0) {
       return NextResponse.json({
         message: `从 ${platform} 拉取到 0 条数据`,
         count: 0,
       });
     }
 
-    upsertMetrics(metrics);
-
     return NextResponse.json({
       message: `${platform} 同步成功`,
-      count: metrics.length,
+      count,
       dateRange: { start, end },
     });
   } catch (error) {

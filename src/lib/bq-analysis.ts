@@ -416,3 +416,319 @@ export async function analyzeSignalEvents(
     };
   });
 }
+
+// ==================== Ad Metrics: BigQuery write ====================
+
+export interface AdMetricRow {
+  date: string;
+  platform: string;
+  campaign_id: string;
+  campaign_name: string;
+  spend: number;
+  impressions: number;
+  clicks: number;
+  conversions: number;
+  ctr: number;
+  cpc: number;
+  revenue: number;
+  sessions?: number;
+  active_users?: number;
+  total_users?: number;
+  event_count?: number;
+  engaged_sessions?: number;
+  engagement_rate?: number;
+  avg_session_duration?: number;
+}
+
+/**
+ * Ensure ad_metrics table exists in BigQuery
+ */
+export async function ensureAdMetricsTable(): Promise<void> {
+  const dataset = process.env.GA4_BQ_DATASET;
+  if (!dataset) throw new Error('GA4_BQ_DATASET 未配置');
+
+  const client = getClient();
+  const datasetRef = client.dataset(dataset);
+
+  // Check if table exists
+  const [tables] = await datasetRef.getTables();
+  const tableExists = tables.some((t: any) => t.id === 'ad_metrics');
+
+  if (!tableExists) {
+    const schema = [
+      { name: 'date', type: 'DATE', mode: 'REQUIRED' },
+      { name: 'platform', type: 'STRING', mode: 'REQUIRED' },
+      { name: 'campaign_id', type: 'STRING' },
+      { name: 'campaign_name', type: 'STRING' },
+      { name: 'spend', type: 'FLOAT64' },
+      { name: 'impressions', type: 'INT64' },
+      { name: 'clicks', type: 'INT64' },
+      { name: 'conversions', type: 'INT64' },
+      { name: 'ctr', type: 'FLOAT64' },
+      { name: 'cpc', type: 'FLOAT64' },
+      { name: 'revenue', type: 'FLOAT64' },
+      { name: 'sessions', type: 'INT64' },
+      { name: 'active_users', type: 'INT64' },
+      { name: 'total_users', type: 'INT64' },
+      { name: 'event_count', type: 'INT64' },
+      { name: 'engaged_sessions', type: 'INT64' },
+      { name: 'engagement_rate', type: 'FLOAT64' },
+      { name: 'avg_session_duration', type: 'FLOAT64' },
+      { name: 'inserted_at', type: 'TIMESTAMP', mode: 'REQUIRED' },
+    ];
+
+    await datasetRef.createTable('ad_metrics', { schema });
+  }
+}
+
+/**
+ * Insert metrics into BigQuery and deduplicate.
+ * Uses streaming insert (fast) followed by MERGE for dedup.
+ */
+export async function upsertMetrics(metrics: AdMetricRow[]): Promise<number> {
+  if (metrics.length === 0) return 0;
+
+  await ensureAdMetricsTable();
+
+  const dataset = process.env.GA4_BQ_DATASET;
+  if (!dataset) throw new Error('GA4_BQ_DATASET 未配置');
+
+  const client = getClient();
+  const table = client.dataset(dataset).table('ad_metrics');
+
+  // Prepare rows for streaming insert
+  const rows = metrics.map((m) => ({
+    insertId: `${m.date}-${m.platform}-${m.campaign_id}-${Date.now()}`,
+    json: {
+      date: m.date,
+      platform: m.platform,
+      campaign_id: m.campaign_id || '',
+      campaign_name: m.campaign_name || '',
+      spend: m.spend || 0,
+      impressions: m.impressions || 0,
+      clicks: m.clicks || 0,
+      conversions: m.conversions || 0,
+      ctr: m.ctr || 0,
+      cpc: m.cpc || 0,
+      revenue: m.revenue || 0,
+      sessions: m.sessions || 0,
+      active_users: m.active_users || 0,
+      total_users: m.total_users || 0,
+      event_count: m.event_count || 0,
+      engaged_sessions: m.engaged_sessions || 0,
+      engagement_rate: m.engagement_rate || 0,
+      avg_session_duration: m.avg_session_duration || 0,
+      inserted_at: new Date().toISOString(),
+    },
+  }));
+
+  const [insertResponse] = await table.insert(rows);
+  const insertErrors = (insertResponse as any)?.insertErrors;
+  if (insertErrors && insertErrors.length > 0) {
+    console.error('BigQuery streaming insert errors:', insertErrors);
+  }
+
+  // Deduplication via MERGE: keep latest inserted_at per (date, platform, campaign_id)
+  const dedupSql = `
+    MERGE \`${dataset}.ad_metrics\` T
+    USING (
+      SELECT * EXCEPT(rn) FROM (
+        SELECT *,
+          ROW_NUMBER() OVER (
+            PARTITION BY date, platform, campaign_id
+            ORDER BY inserted_at DESC
+          ) as rn
+        FROM \`${dataset}.ad_metrics\`
+      ) WHERE rn = 1
+    ) S
+    ON T.date = S.date AND T.platform = S.platform AND T.campaign_id = S.campaign_id
+    WHEN MATCHED AND T.inserted_at < S.inserted_at THEN
+      UPDATE SET
+        campaign_name = S.campaign_name, spend = S.spend,
+        impressions = S.impressions, clicks = S.clicks,
+        conversions = S.conversions, ctr = S.ctr, cpc = S.cpc,
+        revenue = S.revenue, sessions = S.sessions,
+        active_users = S.active_users, total_users = S.total_users,
+        event_count = S.event_count, engaged_sessions = S.engaged_sessions,
+        engagement_rate = S.engagement_rate,
+        avg_session_duration = S.avg_session_duration,
+        inserted_at = S.inserted_at
+    WHEN NOT MATCHED THEN
+      INSERT ROW
+  `;
+
+  await client.query({ query: dedupSql });
+
+  return metrics.length;
+}
+
+// ==================== Ad Metrics: BigQuery read ====================
+
+export async function getGlobalSummary(options?: {
+  startDate?: string;
+  endDate?: string;
+}) {
+  const dataset = process.env.GA4_BQ_DATASET;
+  if (!dataset) throw new Error('GA4_BQ_DATASET 未配置');
+
+  let where = 'WHERE 1=1';
+  const params: Record<string, string> = {};
+  if (options?.startDate) { where += ' AND date >= @startDate'; params.startDate = options.startDate; }
+  if (options?.endDate) { where += ' AND date <= @endDate'; params.endDate = options.endDate; }
+
+  const sql = `
+    SELECT platform,
+      SUM(spend) as total_spend, SUM(impressions) as total_impressions,
+      SUM(clicks) as total_clicks, SUM(conversions) as total_conversions,
+      SUM(revenue) as total_revenue, SUM(sessions) as total_sessions,
+      SUM(active_users) as activeUsers, SUM(event_count) as eventCount
+    FROM \`${dataset}.ad_metrics\`
+    ${where}
+    GROUP BY platform
+  `;
+
+  const client = getClient();
+  const [rows] = await client.query({ query: sql, params });
+  return rows;
+}
+
+export async function getDailySummary(options?: {
+  startDate?: string;
+  endDate?: string;
+}) {
+  const dataset = process.env.GA4_BQ_DATASET;
+  if (!dataset) throw new Error('GA4_BQ_DATASET 未配置');
+
+  let where = 'WHERE 1=1';
+  const params: Record<string, string> = {};
+  if (options?.startDate) { where += ' AND date >= @startDate'; params.startDate = options.startDate; }
+  if (options?.endDate) { where += ' AND date <= @endDate'; params.endDate = options.endDate; }
+
+  const sql = `
+    SELECT date, platform,
+      SUM(spend) as spend, SUM(impressions) as impressions,
+      SUM(clicks) as clicks, SUM(conversions) as conversions,
+      SUM(revenue) as revenue, SUM(sessions) as sessions,
+      SUM(active_users) as activeUsers,
+      SUM(total_users) as totalUsers,
+      SUM(event_count) as eventCount,
+      SUM(engaged_sessions) as engagedSessions
+    FROM \`${dataset}.ad_metrics\`
+    ${where}
+    GROUP BY date, platform
+    ORDER BY date DESC, platform ASC
+  `;
+
+  const client = getClient();
+  const [rows] = await client.query({ query: sql, params });
+  return rows;
+}
+
+export async function getMetrics(options?: {
+  platform?: string;
+  startDate?: string;
+  endDate?: string;
+}) {
+  const dataset = process.env.GA4_BQ_DATASET;
+  if (!dataset) throw new Error('GA4_BQ_DATASET 未配置');
+
+  let where = 'WHERE 1=1';
+  const params: Record<string, string> = {};
+  if (options?.platform) { where += ' AND platform = @platform'; params.platform = options.platform; }
+  if (options?.startDate) { where += ' AND date >= @startDate'; params.startDate = options.startDate; }
+  if (options?.endDate) { where += ' AND date <= @endDate'; params.endDate = options.endDate; }
+
+  const sql = `
+    SELECT *
+    FROM \`${dataset}.ad_metrics\`
+    ${where}
+    ORDER BY date DESC, platform ASC
+  `;
+
+  const client = getClient();
+  const [rows] = await client.query({ query: sql, params });
+  return rows;
+}
+
+// ==================== GA4 metrics directly from events_* ====================
+
+export async function getGA4Metrics(
+  startDate: string,
+  endDate: string
+): Promise<AdMetricRow[]> {
+  const dataset = process.env.GA4_BQ_DATASET;
+  if (!dataset) throw new Error('GA4_BQ_DATASET 未配置');
+
+  const startSuffix = startDate.replace(/-/g, '');
+  const endSuffix = endDate.replace(/-/g, '');
+
+  const sql = `
+    SELECT
+      PARSE_DATE('%Y%m%d', event_date) as date,
+      'ga4' as platform,
+      '' as campaign_id,
+      '' as campaign_name,
+      0.0 as spend,
+      0 as impressions,
+      0 as clicks,
+      COUNTIF(event_name = 'purchase') as conversions,
+      0.0 as ctr,
+      0.0 as cpc,
+      COALESCE(SUM(
+        COALESCE(
+          (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'value'),
+          (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'value')
+        )
+      ), 0) as revenue,
+      COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
+        (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+      )) as sessions,
+      COUNT(DISTINCT user_pseudo_id) as active_users,
+      COUNT(DISTINCT user_pseudo_id) as total_users,
+      COUNT(*) as event_count,
+      COUNTIF(
+        (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') > 0
+      ) as engaged_sessions,
+      SAFE_DIVIDE(
+        COUNTIF(
+          (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') > 0
+        ),
+        COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
+          (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+        ))
+      ) as engagement_rate,
+      SAFE_DIVIDE(
+        SUM((SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec')),
+        COUNT(DISTINCT CONCAT(user_pseudo_id, '-',
+          (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id')
+        ))
+      ) as avg_session_duration
+    FROM \`${dataset}.events_*\`
+    WHERE _TABLE_SUFFIX BETWEEN '${startSuffix}' AND '${endSuffix}'
+    GROUP BY date
+    ORDER BY date DESC
+  `;
+
+  const client = getClient();
+  const [rows] = await client.query({ query: sql });
+  return rows.map((row: any) => ({
+    date: row.date,
+    platform: 'ga4',
+    campaign_id: '',
+    campaign_name: '',
+    spend: 0,
+    impressions: 0,
+    clicks: 0,
+    conversions: Number(row.conversions) || 0,
+    ctr: 0,
+    cpc: 0,
+    revenue: Number(row.revenue) || 0,
+    sessions: Number(row.sessions) || 0,
+    active_users: Number(row.active_users) || 0,
+    total_users: Number(row.total_users) || 0,
+    event_count: Number(row.event_count) || 0,
+    engaged_sessions: Number(row.engaged_sessions) || 0,
+    engagement_rate: Number(row.engagement_rate) || 0,
+    avg_session_duration: Number(row.avg_session_duration) || 0,
+  }));
+}

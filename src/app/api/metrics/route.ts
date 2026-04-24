@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getMetrics } from '@/lib/db';
+import { getMetrics } from '@/lib/bq-analysis';
 
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
@@ -7,7 +7,7 @@ export async function GET(request: NextRequest) {
   const startDate = searchParams.get('startDate') || undefined;
   const endDate = searchParams.get('endDate') || undefined;
 
-  const metrics = getMetrics({ platform, startDate, endDate });
+  const metrics = await getMetrics({ platform, startDate, endDate });
 
   const response = NextResponse.json({ data: metrics });
   response.headers.set('Cache-Control', 'public, max-age=30');
