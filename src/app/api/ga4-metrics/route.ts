@@ -27,9 +27,12 @@ WITH events AS (
     event_timestamp,
     (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'ga_session_id') AS session_id,
     (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'engagement_time_msec') AS engagement_time,
-    COALESCE(
-      (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'value'),
-      (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'value')
+    IF(event_name = 'purchase',
+      COALESCE(
+        (SELECT value.int_value FROM UNNEST(event_params) WHERE key = 'value'),
+        (SELECT value.double_value FROM UNNEST(event_params) WHERE key = 'value')
+      ),
+      0
     ) AS revenue_value
   FROM \`${projectId}.${dataset}.events_*\`
   WHERE _TABLE_SUFFIX BETWEEN '${startSuffix}' AND '${endSuffix}'
