@@ -23,14 +23,19 @@ import Link from 'next/link';
 import { SignalEventsPanel } from './signal-events-panel';
 import { HighValueJourneys } from './high-value-journeys';
 
-interface SummaryData {
-  totals: Record<string, number>;
-  byPlatform: any[];
-  daily: any[];
+interface GA4DailyData {
+  date: string;
+  sessions: number;
+  activeUsers: number;
+  totalUsers: number;
+  eventCount: number;
+  engagedSessions: number;
+  conversions: number;
+  revenue: number;
 }
 
 export default function Ga4Page() {
-  const [summary, setSummary] = useState<SummaryData | null>(null);
+  const [ga4Data, setGa4Data] = useState<GA4DailyData[]>([]);
   const [loading, setLoading] = useState(true);
   const [syncingChannel, setSyncingChannel] = useState(false);
   const [channelData, setChannelData] = useState<any[]>([]);
@@ -43,22 +48,22 @@ export default function Ga4Page() {
     endDate: new Date().toISOString().split('T')[0],
   });
 
-  const fetchSummary = useCallback(async () => {
+  const fetchGA4Data = useCallback(async () => {
     setLoading(true);
     const params = new URLSearchParams();
-    if (dateRange.startDate) params.set('startDate', dateRange.startDate);
-    if (dateRange.endDate) params.set('endDate', dateRange.endDate);
+    params.set('startDate', dateRange.startDate);
+    params.set('endDate', dateRange.endDate);
 
-    const res = await fetch(`/api/summary?${params}`);
+    const res = await fetch(`/api/ga4-metrics?${params}`);
     if (!res.ok) throw new Error(`API 请求失败: ${res.status}`);
-    const data = await res.json();
-    setSummary(data);
+    const json = await res.json();
+    setGa4Data(json.data || []);
     setLoading(false);
   }, [dateRange]);
 
   useEffect(() => {
-    fetchSummary();
-  }, [fetchSummary]);
+    fetchGA4Data();
+  }, [fetchGA4Data]);
 
   const handleSyncChannels = async () => {
     setSyncingChannel(true);
@@ -85,7 +90,7 @@ export default function Ga4Page() {
     setSyncingChannel(false);
   };
 
-  if (loading && !summary) {
+  if (loading && ga4Data.length === 0) {
     return (
       <div className="min-h-screen bg-[#f4f5f7] flex items-center justify-center">
         <div className="flex flex-col items-center gap-3">
@@ -132,7 +137,7 @@ export default function Ga4Page() {
       </header>
 
       <main className="relative max-w-7xl mx-auto px-6 py-6 space-y-5">
-        <Ga4Panel daily={summary?.daily?.filter((d: any) => d.platform === 'ga4') ?? []} />
+        <Ga4Panel daily={ga4Data} />
         <HighValueJourneys dateRange={dateRange} />
         <SourceMediumQuality dateRange={dateRange} channelData={channelData} syncing={syncingChannel} onSync={handleSyncChannels} />
         <GeoHeatmap dateRange={dateRange} />
@@ -173,7 +178,7 @@ function Ga4MetricCard({ label, value, accent }: { label: string; value: string;
   );
 }
 
-function Ga4Panel({ daily }: { daily: any[] }) {
+function Ga4Panel({ daily }: { daily: GA4DailyData[] }) {
   const total = daily.reduce(
     (acc: any, row: any) => ({
       sessions: acc.sessions + (row.sessions || 0),
@@ -182,11 +187,12 @@ function Ga4Panel({ daily }: { daily: any[] }) {
       eventCount: acc.eventCount + (row.eventCount || 0),
       engagedSessions: acc.engagedSessions + (row.engagedSessions || 0),
       conversions: acc.conversions + (row.conversions || 0),
+      revenue: acc.revenue + (Number(row.revenue) || 0),
     }),
-    { sessions: 0, activeUsers: 0, totalUsers: 0, eventCount: 0, engagedSessions: 0, conversions: 0 }
+    { sessions: 0, activeUsers: 0, totalUsers: 0, eventCount: 0, engagedSessions: 0, conversions: 0, revenue: 0 }
   );
 
-  const engagementRate = total && total.sessions > 0 ? ((total.engagedSessions / total.sessions) * 100).toFixed(2) + '%' : '0%';
+  const engagementRate = total.sessions > 0 ? ((total.engagedSessions / total.sessions) * 100).toFixed(2) + '%' : '0%';
 
   return (
     <>
@@ -200,6 +206,7 @@ function Ga4Panel({ daily }: { daily: any[] }) {
         <Ga4MetricCard label="Engaged Sessions" value={fmt(total.engagedSessions)} accent="amber" />
         <Ga4MetricCard label="Engagement Rate" value={engagementRate} accent="rose" />
         <Ga4MetricCard label="Conversions" value={fmt(total.conversions)} accent="indigo" />
+        <Ga4MetricCard label="Revenue" value={fmtMoney(total.revenue)} accent="emerald" />
       </div>
 
       <Card title="GA4 每日趋势">
@@ -234,7 +241,7 @@ function Ga4Panel({ daily }: { daily: any[] }) {
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-slate-200">
-                {['日期', 'Sessions', '活跃用户', '总用户', '事件数', '互动会话', '互动率', '转化'].map((h) => (
+                {['日期', 'Sessions', '活跃用户', '总用户', '事件数', '互动会话', '互动率', '转化', '收入'].map((h) => (
                   <th key={h} className="text-right py-2.5 px-3 font-medium text-xs text-slate-400 uppercase tracking-wider">{h}</th>
                 ))}
               </tr>
@@ -252,6 +259,7 @@ function Ga4Panel({ daily }: { daily: any[] }) {
                     <td className="text-right py-2.5 px-3 text-slate-500 tabular-nums">{fmt(row.engagedSessions)}</td>
                     <td className="text-right py-2.5 px-3 text-slate-500 tabular-nums">{er}</td>
                     <td className="text-right py-2.5 px-3 text-slate-700 tabular-nums font-medium">{fmt(row.conversions)}</td>
+                    <td className="text-right py-2.5 px-3 text-emerald-600 tabular-nums font-medium">{fmtMoney(row.revenue || 0)}</td>
                   </tr>
                 );
               })}
